@@ -1,0 +1,57 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{bash}
+## rRNA removing
+hisat2 -p 40 -x ./Coral_pop/silva_rRNA/silva_rRNA \
+-1 ${sample}.R1.raw.fastq.gz -2 ${sample}.R1.raw.fastq.gz \
+--un-conc-gz ${sample}_clean.fq.gz 2> ${sample}_Map2rRNAStat.xls
+
+## Sequence triming
+trimmomatic PE -threads 40 -phred33 \
+${sample}_clean.fq.1.gz \
+${sample}_clean.fq.2.gz \
+${sample}_1.paired_trim.fq.gz ${sample}_1.unpaired_trim.fq.gz \
+${sample}_2.paired_trim.fq.gz ${sample}_2.unpaired_trim.fq.gz \
+ILLUMINACLIP:Adapters.fas:2:30:10 LEADING:10 TRAILING:10 SLIDINGWINDOW:4:20 MINLEN:40
+rm ${sample}_*.unpaired_trim.fq.gz
+
+## Indexing
+./software/hisat2-2.2.1/extract_exons.py ./Coral_genome/PL_genome/anno/braker/PL_genome.gtf > PL_genome.exons.gtf
+./software/hisat2-2.2.1/extract_splice_sites.py ./Coral_genome/PL_genome/anno/braker/PL_genome.gtf > PL_genome.splice_sites.gtf
+hisat2-build -p 40 \
+--ss PL_genome.splice_sites.gtf \
+--exon PL_genome.exons.gtf \
+./Coral_genome/PL_genome/v2_pilon/PL1-eggs_v2.fasta PL_genome.II
+
+## Mapping
+hisat2 \
+-q --dta -p 40 \
+--very-sensitive \
+-x ./Coral_pop/PL_genome_ref/PL_genome.II \
+-1 ${sample}_1.paired_trim.fq.gz \
+-2 ${sample}_2.paired_trim.fq.gz \
+-S ${sample}_PL.vs.sam > ${sample}_PL.vs.log 2>&1
+
+##sorting
+samtools view -@40 -bS ${sample}_PL.vs.sam > ${sample}_PL.vs.bam 
+samtools sort -@40 ${sample}_PL.vs.bam -o ${sample}_PL.vs.sorted.bam
+rm ${sample}_PL.vs.sam
+rm ${sample}_PL.vs.bam
+
+##Marking unique sequence
+sambamba view \
+-t 40 -h -f bam \
+-F "mapping_quality >= 1 and not (unmapped or secondary_alignment) and not ([XA] != null or [SA] != null)" \
+${sample}_PL.vs.sorted.bam -o ${sample}_PL.vs.sorted.uni.bam
+
+##Marking duplication
+sambamba markdup \
+-r -t 40 \
+--overflow-list-size 600000 \
+${sample}_PL.vs.sorted.uni.bam ${sample}_PL.vs.sorted.uni.duprm.bam
+```
+
+
