@@ -1,0 +1,142 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+```{bash}
+## Genetic diversity
+vcf="XXXX"
+file="pop_map.txt"
+populations -V ${vcf}.vcf -M ${file} -t 10 -O ./stat_files
+```
+
+```{r}
+## Fst calculation
+for (element in Site) {
+  matching_data <- sample.id[sample.id$Site == element, "ID"]
+  file_name <- paste0(element, ".fst.txt")
+  write.table(matching_data, file = file_name, row.names = FALSE, col.names = FALSE, quote = F)
+}
+```
+
+```{bash}
+VCF_FILE="XXX.vcf"
+
+WINDOW_SIZE=10000
+
+pop_files=(*.fst.txt)
+
+for i in {1..24}; do
+    for j in {1..24}; do
+        pop1=$(basename "${pop_files[$i]}" .txt)
+        pop2=$(basename "${pop_files[$j]}" .txt)
+        if [ "$pop1" != "$pop2" ]; then
+        output_file="${pop1}_vs_${pop2}_FST_${WINDOW_SIZE}kb"
+        vcftools --vcf "$VCF_FILE" --weir-fst-pop "${pop_files[$i]}" --weir-fst-pop "${pop_files[$j]}" --fst-window-size "$WINDOW_SIZE" --out "$output_file"
+        fi
+    done
+done
+```
+
+```{r}
+path <- "./Fst_files_log" 
+
+file_list <- list.files(path = path, pattern = "*10000kb.log", full.names = TRUE)
+
+Fst3_df <- data.frame(File_Name = character(),
+                        Fst_Estimate = numeric(),
+                        stringsAsFactors = FALSE)
+
+for (file in file_list) {
+  file_content <- readLines(file)
+  target_lines <- grep("Weir and Cockerham weighted Fst estimate: ", file_content, value = TRUE)
+  if (length(target_lines) > 0) {
+    fst_value <- as.numeric(gsub(".*Weir and Cockerham weighted Fst estimate: (.*)", "\\1", target_lines))
+    file_name <- basename(file)
+    new_row <- data.frame(File_Name = file_name,
+                          Fst_Estimate = fst_value)
+    Fst3_df <- rbind(Fst3_df, new_row)
+  }
+}
+
+pheatmap(Fst3_df[,-1])
+```
+
+
+```{bash}
+## Admixture
+for K in {1..10}
+do 
+admixture --cv ${vcf}.plink3.LD0.2.bed $K | tee ${vcf}.plink3.LD0.2.Admixture.log${K}.out
+done
+grep -h CV ${vcf}.plink3.LD0.2.Admixture.log*.out > ${vcf}.plink3.LD0.2.Admixture.CV.txt
+```
+
+```{bash}
+## IQtree
+vcf="XXX"
+python ./download/vcf2phylip.py --input ${vcf}.vcf
+iqtree -s ${vcf}.min4.phy -m MFP+ASC -T AUTO -B 1000
+```
+
+```{bash}
+## SCMP analysis
+for line in $(cat ${chrom_name})
+do
+####
+singularity run ./software/smcp/smcpp.sif vcf2smc --cores 20 ${vcf} ${path1}/PL_${site}/${line}.${site}.smc.gz ${line} ${site}:BJ2-PL-2_PL.vs.sorted.uni.duprm.bam,BJ2-PL-3_PL.vs.sorted.uni.duprm.bam,BJ2-PL-4_PL.vs.sorted.uni.duprm.bam,BJ2-PL-5_PL.vs.sorted.uni.duprm.bam,BJ2-PL-6_PL.vs.sorted.uni.duprm.bam,BJ2-PL-7_PL.vs.sorted.uni.duprm.bam,BJ2-PL-9_PL.vs.sorted.uni.duprm.bam,BJ2-PL-10_PL.vs.sorted.uni.duprm.bam,BJ2-PL-11_PL.vs.sorted.uni.duprm.bam,BJ2-PL-13_PL.vs.sorted.uni.duprm.bam,BJ2-PL-14_PL.vs.sorted.uni.duprm.bam
+done
+####
+singularity run ./software/smcp/smcpp.sif estimate --em-iterations 50 --thinning 3000 --knots 40 --timepoints 200 1000000 --cores 20 -o ${path1}/PL_${site}/ 1.2e-8 ${path1}/PL_${site}/*.${site}.smc.gz
+####
+singularity run ./software/smcp/smcpp.sif plot ${path2}/${site}_1.2e-8_g3_t200-1000000.pdf ${path1}/PL_${site}/model.final.json -g 3 --ylim 0 10000000 -c
+```
+
+```{r}
+## PCA
+vcf.LD0.2 <- "XXXX.LD0.2.vcf"
+geno_0.2 <- read.pcadapt(vcf.LD0.2, type = c("vcf"))
+geno_0.2_K <- pcadapt(input = geno_0.2, K = 10)
+
+plot(geno_0.2_K, option="screeplot")
+
+## PC1 & PC2
+geno_0.2_K.pca.12 <- plot(geno_0.2_K, option="scores", pop = sample.id$Label, i = 1, j = 2, plt.pkg = "ggplot")
+
+geno_0.2_K.pca.12.df <- geno_0.2_K.pca.12[["data"]] %>%
+  left_join(sample.id[, c("Label","Site", "Name", "Region")], by = c("Pop" = "Label"))
+
+ggplot(geno_0.2_K.pca.12.df, aes(x = PC_i, y = PC_j)) +
+  geom_point(aes(color = Site))
+```
+
+```{r}
+## Relative migration
+MC_LD0.2_gst0.res <- diveRsity::divMigrate(infile = "XXX.LD0.2_genepop.gen", 
+                                           outfile = "XXX.LD0.2.div.network_gst0",
+                                           boots = 0, 
+                                           stat = "gst", 
+                                           filter_threshold = 0, 
+                                           plot_network = TRUE, 
+                                           plot_col = "darkblue", 
+                                           para = FALSE)
+
+MC_LD0.2_gst0.res.df <- as.data.frame(MC_LD0.2_gst0.res)
+
+qgraph(MC_LD0.2_gst0.res.df)
+pheatmap(MC_LD0.2_gst0.res.df)
+```
+
+```{r}
+## Isolation by Distance
+Dis.fst.mantel_result <- mantel(Fst.df, Dis.df, method = "pearson", permutations=999)
+
+## Isolation by Environment
+temp_dist_matrix <- as.matrix(dist(temp_df$temp, method = "euclidean")) 
+
+colnames(temp_dist_matrix) <- as.character(temp_df$site)
+rownames(temp_dist_matrix) <- as.character(temp_df$site)
+
+temp.mantel_result <- mantel(temp_dist_matrix, Fst.df, method = "pearson", permutations=999)
+```
+
+
