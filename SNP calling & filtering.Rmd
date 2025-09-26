@@ -1,0 +1,131 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{bash}
+## SNP calling
+bcftools mpileup --threads 40 \
+ --annotate FORMAT/DP,FORMAT/AD \
+ --bam-list ${Site}.bam.list \
+ --fasta-ref ./Coral_genome/PL_genome/v2_pilon/PL_genome.fasta \
+ -q 20 -Q 20 --skip-indels | bcftools call --threads 40 \
+ --format-fields GQ --multiallelic-caller --variants-only -Ov -o PL.bcf.MC.${Site}.vcf
+ 
+## Indexing
+bgzip -c PL.bcf.MC.${Site}.vcf > PL.bcf.MC.${Site}.vcf.gz
+tabix -f PL.bcf.MC.${Site}.vcf.gz
+
+## Mapping rate
+grep -H 'overall alignment rate' *PL.vs.log > map2PL.vs.log.txt 
+
+## Vcf merging
+vcf="PL.bcf.MC.site30"
+bcftools merge PL.bcf.MC.*.vcf.gz -o ${vcf}.vcf
+```
+
+
+```{bash}
+## Vcf filtering
+vcf="PL.bcf.MC.site30"
+vcftools --vcf ${vcf}.vcf \
+--min-alleles 2 --max-alleles 2 \
+--minDP 10 --maxDP 200 \
+--minGQ 20 \
+--max-missing 0.75 --maf 0.05 \
+--recode --out ${vcf}.F0.75
+
+## SNP missing rate
+vcftools --vcf ${vcf}.F0.75.recode.vcf --missing-indv --out ${vcf}.F0.75.recode.missing
+```
+
+
+```{r}
+## IBS analysis
+vcf <- "XXX.F0.75.recode.vcf"
+snpgdsVCF2GDS(vcf, "XXX.F0.75.recode.gds", method="biallelic.only")
+genofile <- snpgdsOpen("XXX.F0.75.recode.gds")
+
+PL.sample.id <- read.gdsn(index.gdsn(genofile, "sample.id")) %>%
+  as.data.frame()
+
+colnames(PL.sample.id) <- "ID"
+
+PL.sample.id <- PL.sample.id %>%
+  mutate(Label = ID) %>%
+  mutate(Label = gsub("_PL.vs.sorted.uni.duprm.bam","", Label))  %>%
+  mutate(Name = sub("-.*", "", Label)) %>%
+  left_join(Site_label, by = "Name")
+
+ibs <- snpgdsIBS(genofile, autosome.only=F, num.thread=2)
+ibs.df <- ibs[["ibs"]]
+colnames(ibs.df) <- PL.sample.id$Label
+rownames(ibs.df) <- PL.sample.id$Label
+
+PL.ibs.cl2 <- hclust(as.dist(1 - ibs.df), method = "complete" )
+
+PL.ibs.tree2 <- ggtree(PL.ibs.cl2)
+
+PL.ibs.tree2
+
+clusters2 <- cutree(PL.ibs.cl2, 2)
+
+table(clusters2)
+
+PL.rm.list <- names(clusters2[clusters2==2])
+```
+
+
+```{bash}
+## Individual remove
+file="PL.rm.list.txt"
+bgzip -c ${vcf}.vcf > ${vcf}.vcf.gz
+tabix -f ${vcf}.vcf.gz
+vcftools --gzvcf ${vcf}.vcf.gz \
+--recode \
+--recode-INFO-all \
+--stdout \
+--remove ${file}  > ${vcf}.rm.vcf
+```
+
+
+```{bash}
+## Plink treatment
+plink \
+--allow-extra-chr \
+--recode12 \
+--vcf ${vcf}.vcf \
+--out ${vcf}.plink2
+plink \
+--file ${vcf}.plink2 \
+--make-bed \
+--allow-extra-chr \
+--out ${vcf}.plink2
+
+## LD-pruning
+awk '{print $1"\t"$1"_"$4"\t"$3"\t"$4}' ${vcf}.plink2.map > ${vcf}.plink3.map
+mv ${vcf}.plink2.ped ${vcf}.plink3.ped
+###
+plink --file ${vcf}.plink3 \
+--allow-extra-chr \
+--indep-pairwise 10000 1000 0.2 \
+--out ${vcf}.plink3.LD0.2
+###
+bgzip ${vcf}.vcf
+bcftools index ${vcf}.vcf.gz
+###
+awk -F_ '{print $1 "_" $2 "\t" $3}' ${vcf}.plink3.LD0.2.prune.in > ${vcf}.plink3.LD0.2.prune.in.txt
+###
+bcftools view \
+-R ${vcf}.plink3.LD0.2.prune.in.txt \
+${vcf}.vcf.gz \
+-o ${vcf}.plink3.LD0.2.vcf
+###
+vcftools --vcf ${vcf}.plink3.LD0.2.vcf \
+--plink \
+--out ${vcf}.plink3.LD0.2
+plink \
+--file ${vcf}.plink3.LD0.2 \
+--make-bed --allow-extra-chr \
+--out ${vcf}.plink3.LD0.2
+```
